@@ -278,8 +278,6 @@ def _validate_unsupported_claims(
     violations = []
 
     for pattern, label in UNSUPPORTED_CLAIM_PATTERNS:
-        # Если этот факт присутствует в исходных данных,
-        # его использование разрешено.
         if pattern.search(source):
             continue
 
@@ -289,10 +287,6 @@ def _validate_unsupported_claims(
                 match.start(),
             )
 
-            # Например:
-            # "Сведения о гарантии не указаны."
-            # Это не галлюцинация, а корректное указание
-            # на недостаточность исходных данных.
             if _is_missing_data_statement(sentence):
                 continue
 
@@ -331,8 +325,6 @@ def normalize_seo_description(text: str) -> str:
     """Bring SEO description to 800–1200 chars without inventing facts."""
     text = " ".join(text.split()).strip()
 
-    # Если модель написала слишком много — оставляем только
-    # полные предложения, которые помещаются в лимит.
     if len(text) > SEO_DESCRIPTION_MAX:
         sentences = re.split(r"(?<=[.!?])\s+", text)
 
@@ -354,7 +346,6 @@ def normalize_seo_description(text: str) -> str:
         if selected:
             text = " ".join(selected)
 
-        # Запасной вариант на случай одного огромного предложения.
         if len(text) > SEO_DESCRIPTION_MAX:
             text = text[:SEO_DESCRIPTION_MAX - 1]
 
@@ -363,8 +354,6 @@ def normalize_seo_description(text: str) -> str:
 
             text = text.rstrip(" ,;:-") + "."
 
-    # Если модель недобрала несколько символов или даже 100–200 —
-    # дополняем только заранее заданными нейтральными фразами.
     filler_index = 0
 
     while len(text) < SEO_DESCRIPTION_MIN:
