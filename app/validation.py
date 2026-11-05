@@ -226,20 +226,78 @@ def _numbers(text: str) -> set[str]:
     }
 
 
+def _sentence_around(text: str, position: int) -> str:
+    """Return the sentence containing position."""
+    separators = ".!?\\n"
+
+    start = -1
+    for separator in separators:
+        start = max(start, text.rfind(separator, 0, position))
+
+    end_positions = [
+        text.find(separator, position)
+        for separator in separators
+        if text.find(separator, position) != -1
+    ]
+
+    end = min(end_positions) if end_positions else len(text)
+
+    return text[start + 1:end].strip().lower()
+
+
+def _is_missing_data_statement(sentence: str) -> bool:
+    """Allow neutral mentions that explicitly say data is absent."""
+    markers = (
+        "не указан",
+        "не указана",
+        "не указано",
+        "не указаны",
+        "не привед",
+        "не предостав",
+        "отсутств",
+        "нет данных",
+        "данных нет",
+        "неизвест",
+        "не извест",
+        "требует уточ",
+        "требуют уточ",
+        "следует уточ",
+        "нужно уточ",
+        "необходимо уточ",
+    )
+
+    return any(marker in sentence for marker in markers)
+
+
 def _validate_unsupported_claims(
     generated: str,
     source: str,
 ) -> None:
-    """Reject common assumptions absent from source data."""
+    """Reject unsupported positive claims, but allow missing-data notices."""
 
     violations = []
 
     for pattern, label in UNSUPPORTED_CLAIM_PATTERNS:
-        if (
-            pattern.search(generated)
-            and not pattern.search(source)
-        ):
+        # Если этот факт присутствует в исходных данных,
+        # его использование разрешено.
+        if pattern.search(source):
+            continue
+
+        for match in pattern.finditer(generated):
+            sentence = _sentence_around(
+                generated,
+                match.start(),
+            )
+
+            # Например:
+            # "Сведения о гарантии не указаны."
+            # Это не галлюцинация, а корректное указание
+            # на недостаточность исходных данных.
+            if _is_missing_data_statement(sentence):
+                continue
+
             violations.append(label)
+            break
 
     if violations:
         raise OutputValidationError(
@@ -248,6 +306,82 @@ def _validate_unsupported_claims(
             + "."
         )
 
+
+
+SEO_DESCRIPTION_MIN = 800
+SEO_DESCRIPTION_MAX = 1200
+
+SAFE_DESCRIPTION_FILLERS = (
+    (
+        "Дополнительные сведения, отсутствующие во входных данных, "
+        "следует уточнить по техническому паспорту или у производителя."
+    ),
+    (
+        "При выборе товара следует сверить переданные характеристики "
+        "с требованиями конкретного проекта."
+    ),
+    (
+        "Черновик подготовлен только на основании предоставленных "
+        "исходных данных без добавления неподтверждённых характеристик."
+    ),
+)
+
+
+def normalize_seo_description(text: str) -> str:
+    """Bring SEO description to 800–1200 chars without inventing facts."""
+    text = " ".join(text.split()).strip()
+
+    # Если модель написала слишком много — оставляем только
+    # полные предложения, которые помещаются в лимит.
+    if len(text) > SEO_DESCRIPTION_MAX:
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+
+        selected = []
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+
+            if not sentence:
+                continue
+
+            candidate = " ".join(selected + [sentence])
+
+            if len(candidate) > SEO_DESCRIPTION_MAX:
+                break
+
+            selected.append(sentence)
+
+        if selected:
+            text = " ".join(selected)
+
+        # Запасной вариант на случай одного огромного предложения.
+        if len(text) > SEO_DESCRIPTION_MAX:
+            text = text[:SEO_DESCRIPTION_MAX - 1]
+
+            if " " in text:
+                text = text.rsplit(" ", 1)[0]
+
+            text = text.rstrip(" ,;:-") + "."
+
+    # Если модель недобрала несколько символов или даже 100–200 —
+    # дополняем только заранее заданными нейтральными фразами.
+    filler_index = 0
+
+    while len(text) < SEO_DESCRIPTION_MIN:
+        filler = SAFE_DESCRIPTION_FILLERS[
+            filler_index % len(SAFE_DESCRIPTION_FILLERS)
+        ]
+
+        candidate = f"{text} {filler}".strip()
+
+        if len(candidate) <= SEO_DESCRIPTION_MAX:
+            text = candidate
+        else:
+            break
+
+        filler_index += 1
+
+    return text
 
 def validate_llm_output(result: Any, product: dict) -> dict:
     if not isinstance(result, dict):
@@ -287,6 +421,10 @@ def validate_llm_output(result: Any, product: dict) -> dict:
             )
 
         result[key] = result[key].strip()
+
+    result["seo_description"] = normalize_seo_description(
+        result["seo_description"]
+    )
 
     if len(result["seo_title"]) > 70:
         raise OutputValidationError(

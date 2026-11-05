@@ -115,3 +115,115 @@ def test_unsupported_industrial_claim_is_rejected():
             result,
             product,
         )
+
+
+def test_missing_warranty_statement_is_allowed():
+    product = {
+        "name": "Манометр DM 02",
+        "manufacturer": "Манотомь",
+        "description": (
+            "Прибор предназначен для измерения "
+            "избыточного давления."
+        ),
+        "specs": {
+            "диапазон": "0–1,6 МПа",
+        },
+    }
+
+    description = (
+        "Манометр DM 02 производства Манотомь "
+        "предназначен для измерения избыточного давления. "
+        "Диапазон измерений составляет 0–1,6 МПа. "
+        "Сведения о гарантии не указаны. "
+        "Сведения о комплектации отсутствуют. "
+        "Информацию о сертификации необходимо уточнить. "
+        "При выборе прибора следует сверить указанные "
+        "характеристики с требованиями проекта. "
+    )
+
+    description += (
+        "Дополнительные сведения, отсутствующие "
+        "во входных данных, следует уточнить "
+        "по технической документации. "
+    ) * 6
+
+    result = {
+        "seo_title": "Манометр DM 02 Манотомь",
+        "seo_description": description[:1100],
+        "search_queries": [
+            "Манометр DM 02",
+            "Манометр DM 02 Манотомь",
+            "Манометр 0–1,6 МПа",
+        ],
+        "commercial_block": (
+            "Предназначен для измерения "
+            "избыточного давления."
+        ),
+    }
+
+    validated = validate_llm_output(
+        result,
+        product,
+    )
+
+    assert validated["seo_title"] == (
+        "Манометр DM 02 Манотомь"
+    )
+
+
+def _length_test_product():
+    return {
+        "name": "Манометр DM 02",
+        "manufacturer": "Манотомь",
+        "description": (
+            "Прибор предназначен для измерения "
+            "избыточного давления."
+        ),
+        "specs": {
+            "диапазон": "0–1,6 МПа",
+        },
+    }
+
+
+def _length_test_result(description):
+    return {
+        "seo_title": "Манометр DM 02 Манотомь",
+        "seo_description": description,
+        "search_queries": [
+            "Манометр DM 02",
+            "Манометр DM 02 Манотомь",
+            "Манометр 0–1,6 МПа",
+        ],
+        "commercial_block": (
+            "Предназначен для измерения "
+            "избыточного давления."
+        ),
+    }
+
+
+def test_short_seo_description_is_safely_extended():
+    description = (
+        "Манометр DM 02 предназначен для измерения "
+        "избыточного давления. "
+    ) * 8
+
+    result = validate_llm_output(
+        _length_test_result(description),
+        _length_test_product(),
+    )
+
+    assert 800 <= len(result["seo_description"]) <= 1200
+
+
+def test_long_seo_description_is_trimmed():
+    description = (
+        "Манометр DM 02 предназначен для измерения "
+        "избыточного давления. "
+    ) * 25
+
+    result = validate_llm_output(
+        _length_test_result(description),
+        _length_test_product(),
+    )
+
+    assert 800 <= len(result["seo_description"]) <= 1200
