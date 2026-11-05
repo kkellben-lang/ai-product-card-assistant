@@ -1,0 +1,208 @@
+import json
+import re
+from typing import Any
+
+
+NUMBER_RE = re.compile(
+    r"(?<![A-Za-zА-Яа-яЁё])\d+(?:[.,]\d+)?(?![A-Za-zА-Яа-яЁё])"
+)
+
+
+class InputValidationError(ValueError):
+    pass
+
+
+class OutputValidationError(ValueError):
+    pass
+
+
+def validate_product_input(data: Any) -> dict:
+    if not isinstance(data, dict):
+        raise InputValidationError("Входные данные должны быть JSON-объектом.")
+
+    normalized = {}
+    for field in ("name", "manufacturer", "description"):
+        value = data.get(field, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise InputValidationError(f'Поле "{field}" должно быть строкой.')
+        normalized[field] = value.strip()
+
+    specs = data.get("specs", {})
+    if specs is None:
+        specs = {}
+    if not isinstance(specs, dict):
+        raise InputValidationError('Поле "specs" должно быть JSON-объектом.')
+
+    normalized_specs = {}
+    for key, value in specs.items():
+        if not isinstance(key, str):
+            raise InputValidationError("Названия характеристик должны быть строками.")
+        if value is None:
+            value = ""
+        if not isinstance(value, (str, int, float, bool)):
+            raise InputValidationError(
+                f'Значение характеристики "{key}" должно быть простым значением.'
+            )
+        normalized_specs[key.strip()] = str(value).strip()
+
+    normalized["specs"] = normalized_specs
+
+    if not any((
+        normalized["name"],
+        normalized["manufacturer"],
+        normalized["description"],
+        normalized["specs"],
+    )):
+        raise InputValidationError(
+            "Передан пустой товар: заполните хотя бы одно поле."
+        )
+
+    return normalized
+
+
+def collect_missing_fields(product: dict) -> list[str]:
+    """Report explicit gaps and clearly weak input without inventing fields."""
+    missing: list[str] = []
+
+    if not product.get("name"):
+        missing.append("name — название товара")
+    if not product.get("manufacturer"):
+        missing.append("manufacturer — производитель")
+
+    description = product.get("description", "").strip()
+    if not description:
+        missing.append(
+            "description — описание/фрагмент технического паспорта отсутствует"
+        )
+    elif len(description) < 100 or len(description.split()) < 12:
+        missing.append(
+            "description — исходное описание слишком краткое; "
+            "желательно добавить более полный фрагмент паспорта"
+        )
+
+    specs = product.get("specs", {})
+    if not specs:
+        missing.append("specs — ключевые технические характеристики отсутствуют")
+    else:
+        for key, value in specs.items():
+            if not str(value).strip():
+                missing.append(f"specs.{key} — значение отсутствует")
+
+    return missing
+
+
+def build_characteristics(product: dict) -> list[dict[str, str]]:
+    specs = product.get("specs", {})
+    if not specs:
+        return [{"name": "характеристики", "value": "данных нет"}]
+
+    return [
+        {
+            "name": key,
+            "value": value if str(value).strip() else "данных нет",
+        }
+        for key, value in specs.items()
+    ]
+
+
+def _numbers(text: str) -> set[str]:
+    return {
+        match.group(0).replace(",", ".")
+        for match in NUMBER_RE.finditer(text)
+    }
+
+
+def validate_llm_output(result: Any, product: dict) -> dict:
+    if not isinstance(result, dict):
+        raise OutputValidationError("Ответ модели должен быть JSON-объектом.")
+
+    required = (
+        "seo_title",
+        "seo_description",
+        "search_queries",
+        "commercial_block",
+    )
+    missing = [key for key in required if key not in result]
+    if missing:
+        raise OutputValidationError(
+            "В ответе отсутствуют поля: " + ", ".join(missing)
+        )
+
+    for key in ("seo_title", "seo_description", "commercial_block"):
+        if not isinstance(result[key], str) or not result[key].strip():
+            raise OutputValidationError(
+                f'Поле "{key}" должно быть непустой строкой.'
+            )
+        result[key] = result[key].strip()
+
+    if len(result["seo_title"]) > 70:
+        raise OutputValidationError(
+            f"SEO-заголовок длиннее 70 символов: {len(result['seo_title'])}."
+        )
+
+    if "купить" in result["seo_title"].lower():
+        raise OutputValidationError(
+            "SEO-заголовок не должен автоматически добавлять слово «купить»."
+        )
+
+    description_length = len(result["seo_description"])
+    if not 800 <= description_length <= 1200:
+        raise OutputValidationError(
+            "SEO-описание должно содержать 800–1200 символов, "
+            f"сейчас {description_length}."
+        )
+
+    queries = result["search_queries"]
+    if (
+        not isinstance(queries, list)
+        or not 3 <= len(queries) <= 5
+        or not all(isinstance(query, str) and query.strip() for query in queries)
+    ):
+        raise OutputValidationError(
+            "search_queries должен содержать 3–5 непустых строк."
+        )
+    result["search_queries"] = [query.strip() for query in queries]
+
+    allowed_numbers = _numbers(json.dumps(product, ensure_ascii=False))
+    generated_numbers = _numbers(" ".join([
+        result["seo_title"],
+        result["seo_description"],
+        result["commercial_block"],
+        *result["search_queries"],
+    ]))
+    unsupported_numbers = sorted(generated_numbers - allowed_numbers)
+    if unsupported_numbers:
+        raise OutputValidationError(
+            "Модель добавила числовые значения, которых нет во входных данных: "
+            + ", ".join(unsupported_numbers)
+        )
+
+    return result
+
+
+def validate_fact_review(review: Any) -> dict:
+    if not isinstance(review, dict):
+        raise OutputValidationError("Ответ факт-чекера должен быть JSON-объектом.")
+
+    if not isinstance(review.get("is_grounded"), bool):
+        raise OutputValidationError("Факт-чекер не вернул is_grounded=true/false.")
+
+    claims = review.get("unsupported_claims")
+    if not isinstance(claims, list):
+        raise OutputValidationError(
+            "Факт-чекер не вернул список unsupported_claims."
+        )
+
+    for item in claims:
+        if not isinstance(item, dict):
+            raise OutputValidationError(
+                "Элементы unsupported_claims должны быть объектами."
+            )
+        if not isinstance(item.get("claim", ""), str):
+            raise OutputValidationError("Некорректное поле claim у факт-чекера.")
+        if not isinstance(item.get("reason", ""), str):
+            raise OutputValidationError("Некорректное поле reason у факт-чекера.")
+
+    return review
